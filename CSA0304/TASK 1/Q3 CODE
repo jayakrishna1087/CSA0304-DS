@@ -1,0 +1,240 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+
+#define MAXK 99                         /* big enough for order 100 (t = 50): 2t-1 keys */
+typedef struct B { int n, leaf; int key[MAXK]; struct B *c[MAXK + 1]; } B;
+static int T = 2;                       /* minimum degree */
+static long splits;
+static int last_median; static int last_was_root;
+
+static B *new_b(int leaf) { B *x = calloc(1, sizeof *x); if (!x) { perror("calloc"); exit(1); } x->leaf = leaf; return x; }
+
+static void split_child(B *x, int i)
+{
+    B *y = x->c[i], *z = new_b(y->leaf);
+    z->n = T - 1;
+    for (int j = 0; j < T - 1; j++) z->key[j] = y->key[j + T];
+    if (!y->leaf) for (int j = 0; j < T; j++) z->c[j] = y->c[j + T];
+    for (int j = x->n; j >= i + 1; j--) x->c[j + 1] = x->c[j];
+    x->c[i + 1] = z;
+    for (int j = x->n - 1; j >= i; j--) x->key[j + 1] = x->key[j];
+    x->key[i] = y->key[T - 1];          /* median moves up */
+    last_median = y->key[T - 1];
+    y->n = T - 1;
+    x->n++;
+    splits++;
+}
+
+static void insert_nonfull(B *x, int k)
+{
+    int i = x->n - 1;
+    if (x->leaf) {
+        while (i >= 0 && k < x->key[i]) { x->key[i + 1] = x->key[i]; i--; }
+        x->key[i + 1] = k; x->n++;
+        return;
+    }
+    while (i >= 0 && k < x->key[i]) i--;
+    i++;
+    if (x->c[i]->n == 2 * T - 1) { split_child(x, i); if (k > x->key[i]) i++; }
+    insert_nonfull(x->c[i], k);
+}
+
+B *btree_insert(B *root, int k)
+{
+    if (!root) { root = new_b(1); root->key[0] = k; root->n = 1; return root; }
+    last_was_root = 0;
+    if (root->n == 2 * T - 1) {
+        B *s = new_b(0); s->c[0] = root;
+        split_child(s, 0); last_was_root = 1;
+        root = s;
+    }
+    insert_nonfull(root, k);
+    return root;
+}
+
+/* search: returns number of nodes read (= disk reads); *found set */
+int btree_search(const B *x, int k, int *found)
+{
+    int reads = 0;
+    *found = 0;
+    while (x) {
+        reads++;
+        int i = 0;
+        while (i < x->n && k > x->key[i]) i++;
+        if (i < x->n && k == x->key[i]) { *found = 1; return reads; }
+        if (x->leaf) return reads;
+        x = x->c[i];
+    }
+    return reads;
+}
+
+static int bheight(const B *x) { int h = 0; while (x && !x->leaf) { x = x->c[0]; h++; } return h; }
+static void bcount(const B *x, long *nodes, long *keys)
+{
+    if (!x) return;
+    (*nodes)++; *keys += x->n;
+    if (!x->leaf) for (int i = 0; i <= x->n; i++) bcount(x->c[i], nodes, keys);
+}
+static void bfree(B *x) { if (!x) return; if (!x->leaf) for (int i = 0; i <= x->n; i++) bfree(x->c[i]); free(x); }
+
+static void print_level(const B *root, int target, int level, int *any)
+{
+    if (!root) return;
+    if (level == target) {
+        printf(" [");
+        for (int i = 0; i < root->n; i++) printf(i ? " %d" : "%d", root->key[i]);
+        printf("]");
+        *any = 1;
+        return;
+    }
+    if (!root->leaf) for (int i = 0; i <= root->n; i++) print_level(root->c[i], target, level + 1, any);
+}
+static void print_tree(const B *root)             /* prints only non-empty levels */
+{
+    int h = bheight(root);
+    for (int lv = 0; lv <= h; lv++) {
+        int any = 0;
+        printf("      L%d:", lv);
+        print_level(root, lv, 0, &any);
+        printf("\n");
+    }
+}
+
+/* ---------------- plain BST and AVL for the comparison ---------------- */
+typedef struct BN { int key; struct BN *l, *r; } BN;
+typedef struct AN { int key, h; struct AN *l, *r; } AN;
+static int ah(const AN *n) { return n ? n->h : 0; }
+static void afix(AN *n) { int a = ah(n->l), b = ah(n->r); n->h = 1 + (a > b ? a : b); }
+static AN *rr(AN *y) { AN *x = y->l; y->l = x->r; x->r = y; afix(y); afix(x); return x; }
+static AN *rl(AN *x) { AN *y = x->r; x->r = y->l; y->l = x; afix(x); afix(y); return y; }
+static AN *avl_ins(AN *n, int k)
+{
+    if (!n) { n = malloc(sizeof *n); n->key = k; n->h = 1; n->l = n->r = NULL; return n; }
+    if (k < n->key) n->l = avl_ins(n->l, k); else if (k > n->key) n->r = avl_ins(n->r, k); else return n;
+    afix(n);
+    int b = ah(n->l) - ah(n->r);
+    if (b > 1 && k < n->l->key) return rr(n);
+    if (b < -1 && k > n->r->key) return rl(n);
+    if (b > 1) { n->l = rl(n->l); return rr(n); }
+    if (b < -1) { n->r = rr(n->r); return rl(n); }
+    return n;
+}
+static void afree(AN *n) { if (n) { afree(n->l); afree(n->r); free(n); } }
+static void bfree_bst(BN *n) { if (n) { bfree_bst(n->l); bfree_bst(n->r); free(n); } }
+
+static unsigned long long rng = 88172645463325252ULL;
+static unsigned next_rand(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (unsigned)(rng >> 11); }
+static double now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e3 + t.tv_nsec / 1e6; }
+
+/* ---------------- sections ---------------- */
+static void section1(void)
+{
+    printf("=== Q3 hand-trace: B-tree of minimum degree t=2 (order 4: 1..3 keys per node) ===\n");
+    T = 2; splits = 0;
+    int keys[] = {10, 20, 5, 6, 12, 30, 7, 17};
+    B *root = NULL;
+    for (int i = 0; i < 8; i++) {
+        long before = splits;
+        root = btree_insert(root, keys[i]);
+        printf("insert %-2d", keys[i]);
+        if (splits > before) {
+            printf("  -> %ld split(s); median %d moved up%s\n", splits - before, last_median,
+                   last_was_root ? " (root was full: tree grows one level)" : "");
+        } else printf("  -> no split\n");
+        print_tree(root);
+    }
+    long nodes = 0, nk = 0; bcount(root, &nodes, &nk);
+    printf("final: height = %d (edges), %ld nodes, %ld keys, %ld splits\n", bheight(root), nodes, nk, splits);
+    bfree(root);
+}
+
+static void section2(void)
+{
+    printf("=== Q3 height of a B-tree of order 100 holding 5,000,000 keys ===\n");
+    double n = 5e6; int m = 100, t = (m + 1) / 2;             /* t = ceil(m/2) = 50 */
+    printf("order m = %d -> max children %d, max keys %d; minimum degree t = %d\n", m, m, m - 1, t);
+    printf("worst-case height  h <= log_t((n+1)/2) = log_%d(%.1f) = %.3f -> h = %d edges = %d levels\n",
+           t, (n + 1) / 2, log((n + 1) / 2) / log(t), (int)floor(log((n + 1) / 2) / log(t)), (int)floor(log((n + 1) / 2) / log(t)) + 1);
+    printf("best-case (all nodes full, 99 keys): levels needed = ");
+    double cap = 0, lvl = 1; int L = 0;
+    while (cap < n) { L++; cap += lvl * (m - 1); lvl *= m; }
+    printf("%d (capacity %.0f keys)\n", L, cap);
+    printf("minimum keys for height h: 2*t^h - 1 -> h=3: %.0f, h=4: %.0f  (5,000,000 lies below h=4)\n",
+           2 * pow(t, 3) - 1, 2 * pow(t, 4) - 1);
+    printf("=> every search reads exactly 4 nodes; AVL needs about log2(5e6) = %.1f\n", log2(n));
+    int block = 4096, ks = 8, ptr = 8;
+    int maxk = (block - 8 - ptr) / (ks + ptr);
+    printf("block-size rule: 4096-byte block, 8-byte key, 8-byte child pointer -> up to %d keys/node (order %d)\n", maxk, maxk + 1);
+}
+
+static void section3(void)
+{
+    const int N = 5000000, Q = 20000;
+    printf("=== Q3 simulation: %d keys, %d random searches per structure ===\n", N, Q);
+    int *keys = malloc((size_t)N * sizeof *keys);
+    for (int i = 0; i < N; i++) keys[i] = i + 1;
+    for (int i = N - 1; i > 0; i--) { int j = next_rand() % (i + 1); int x = keys[i]; keys[i] = keys[j]; keys[j] = x; }
+    int *q = malloc(Q * sizeof *q);
+    for (int i = 0; i < Q; i++) q[i] = 1 + next_rand() % N;
+
+    /* B-tree, order 100 */
+    T = 50; splits = 0;
+    double t0 = now_ms();
+    B *bt = NULL;
+    for (int i = 0; i < N; i++) bt = btree_insert(bt, keys[i]);
+    double bt_build = now_ms() - t0;
+    long tot = 0; int mx = 0, f;
+    for (int i = 0; i < Q; i++) { int r = btree_search(bt, q[i], &f); tot += r; if (r > mx) mx = r; }
+    double bt_avg = (double)tot / Q; int bt_max = mx;
+    long nodes = 0, nk = 0; bcount(bt, &nodes, &nk);
+    int r_min = btree_search(bt, 1, &f), fmin = f;
+    int r_max = btree_search(bt, N, &f), fmax = f;
+    int r_mis = btree_search(bt, N + 1, &f), fmis = f;
+    printf("B-tree (order 100): built in %.0f ms, height %d edges, %ld nodes, %.1f keys/node (%.0f%% full)\n",
+           bt_build, bheight(bt), nodes, (double)nk / nodes, 100.0 * nk / nodes / MAXK);
+    printf("  search smallest key (1)       : %s, %d reads\n", fmin ? "found" : "missing", r_min);
+    printf("  search largest key (%d)  : %s, %d reads\n", N, fmax ? "found" : "missing", r_max);
+    printf("  search missing key (%d)  : %s, %d reads\n", N + 1, fmis ? "found" : "missing", r_mis);
+    bfree(bt);
+
+    /* plain BST (random order) */
+    t0 = now_ms();
+    BN *bst = NULL;
+    for (int i = 0; i < N; i++) {
+        BN **p = &bst;
+        while (*p) p = keys[i] < (*p)->key ? &(*p)->l : &(*p)->r;
+        *p = malloc(sizeof **p); (*p)->key = keys[i]; (*p)->l = (*p)->r = NULL;
+    }
+    double bst_build = now_ms() - t0;
+    long bv = 0; int bmx = 0;
+    for (int i = 0; i < Q; i++) { int v = 0; const BN *x = bst; while (x) { v++; if (q[i] == x->key) break; x = q[i] < x->key ? x->l : x->r; } bv += v; if (v > bmx) bmx = v; }
+    printf("BST (random order) : built in %.0f ms\n", bst_build);
+    bfree_bst(bst);
+
+    /* AVL */
+    t0 = now_ms();
+    AN *avl = NULL;
+    for (int i = 0; i < N; i++) avl = avl_ins(avl, keys[i]);
+    double avl_build = now_ms() - t0;
+    long av = 0; int amx = 0;
+    for (int i = 0; i < Q; i++) { int v = 0; const AN *x = avl; while (x) { v++; if (q[i] == x->key) break; x = q[i] < x->key ? x->l : x->r; } av += v; if (v > amx) amx = v; }
+    printf("AVL tree           : built in %.0f ms, height %d levels\n", avl_build, ah(avl));
+    afree(avl);
+
+    printf("\n%-14s %12s %12s %16s %16s\n", "structure", "avg visits", "max visits", "avg time @10ms", "max time @10ms");
+    printf("%-14s %12.2f %12d %13.0f ms %13.0f ms\n", "BST (random)", (double)bv / Q, bmx, 10.0 * bv / Q, 10.0 * bmx);
+    printf("%-14s %12.2f %12d %13.0f ms %13.0f ms\n", "AVL", (double)av / Q, amx, 10.0 * av / Q, 10.0 * amx);
+    printf("%-14s %12.2f %12d %13.0f ms %13.0f ms\n", "B-tree (m=100)", bt_avg, bt_max, 10.0 * bt_avg, 10.0 * bt_max);
+    free(keys); free(q);
+}
+
+int main(int argc, char **argv)
+{
+    int sel = argc > 1 ? atoi(argv[1]) : 0;
+    if (!sel || sel == 1) section1();
+    if (!sel || sel == 2) section2();
+    if (!sel || sel == 3) section3();
+    return 0;
+}
