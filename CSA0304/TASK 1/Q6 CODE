@@ -1,0 +1,355 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+/* ---------------- ternary search tree ---------------- */
+typedef struct { int lo, eq, hi; char c; unsigned char end; } TNode;     /* 16 bytes per node */
+typedef struct { TNode *a; int n, cap, root; } TST;
+
+static void tst_init(TST *t) { t->a = NULL; t->n = t->cap = 0; t->root = -1; }
+static int tst_new(TST *t, char c)
+{
+    if (t->n == t->cap) {
+        t->cap = t->cap ? t->cap * 2 : 1024;
+        t->a = realloc(t->a, (size_t)t->cap * sizeof(TNode));
+        if (!t->a) { perror("realloc"); exit(1); }
+    }
+    TNode *x = &t->a[t->n];
+    x->lo = x->eq = x->hi = -1; x->c = c; x->end = 0;
+    return t->n++;
+}
+static void set_link(TST *t, int parent, int which, int child)           /* which: 0=lo 1=eq 2=hi */
+{
+    if (parent < 0) t->root = child;
+    else if (which == 0) t->a[parent].lo = child;
+    else if (which == 1) t->a[parent].eq = child;
+    else t->a[parent].hi = child;
+}
+static void tst_insert(TST *t, const char *w)
+{
+    if (!*w) return;
+    int parent = -1, which = 0, cur = t->root;
+    for (;;) {
+        if (cur < 0) { cur = tst_new(t, *w); set_link(t, parent, which, cur); }
+        parent = cur;
+        if (*w < t->a[cur].c)      { which = 0; cur = t->a[cur].lo; }
+        else if (*w > t->a[cur].c) { which = 2; cur = t->a[cur].hi; }
+        else {
+            if (!w[1]) { t->a[cur].end = 1; return; }
+            w++; which = 1; cur = t->a[cur].eq;
+        }
+    }
+}
+static int tst_lookup(const TST *t, const char *w)
+{
+    int n = t->root;
+    if (!*w) return 0;
+    while (n >= 0) {
+        if (*w < t->a[n].c) n = t->a[n].lo;
+        else if (*w > t->a[n].c) n = t->a[n].hi;
+        else { if (!w[1]) return t->a[n].end; w++; n = t->a[n].eq; }
+    }
+    return 0;
+}
+
+/* in-order collection of all words below node n (prefix already in buf[0..d-1]); output is alphabetical */
+typedef struct { int limit, count, silent; char (*out)[32]; } Sink;
+static void emit(Sink *s, const char *word)
+{
+    if (s->out && s->count < s->limit) strcpy(s->out[s->count], word);
+    else if (!s->silent && s->count < s->limit) printf("%s ", word);
+    s->count++;
+}
+static void collect(const TST *t, int n, char *buf, int d, Sink *s)
+{
+    if (n < 0 || s->count >= s->limit) return;
+    collect(t, t->a[n].lo, buf, d, s);
+    if (s->count >= s->limit) return;
+    buf[d] = t->a[n].c;
+    if (t->a[n].end) { buf[d + 1] = 0; emit(s, buf); }
+    collect(t, t->a[n].eq, buf, d + 1, s);
+    collect(t, t->a[n].hi, buf, d, s);
+}
+/* autocomplete: first `limit` words that start with p, alphabetical */
+static int tst_autocomplete(const TST *t, const char *p, int limit, int silent, char (*out)[32])
+{
+    Sink s = {limit, 0, silent, out};
+    char buf[64];
+    if (!*p) { collect(t, t->root, buf, 0, &s); return s.count; }
+    int n = t->root, i = 0;
+    while (n >= 0) {
+        if (p[i] < t->a[n].c) n = t->a[n].lo;
+        else if (p[i] > t->a[n].c) n = t->a[n].hi;
+        else {
+            buf[i] = p[i];
+            if (!p[i + 1]) {
+                if (t->a[n].end) { buf[i + 1] = 0; emit(&s, buf); }
+                collect(t, t->a[n].eq, buf, i + 1, &s);
+                return s.count;
+            }
+            i++; n = t->a[n].eq;
+        }
+    }
+    return 0;
+}
+
+/* alphabetical range: all words w with lo <= w <= hi, in order (pruned traversal) */
+static void range_rec(const TST *t, int n, char *buf, int d, const char *lo, const char *hi, int tl, int th, Sink *s)
+{
+    if (n < 0 || s->count >= s->limit) return;
+    char c = t->a[n].c;
+    char minc = (tl && lo[d]) ? lo[d] : 1;                  /* smallest letter allowed at this position   */
+    char maxc = th ? hi[d] : 127;                           /* largest letter allowed (0 = hi has ended)   */
+    if (c > minc) range_rec(t, t->a[n].lo, buf, d, lo, hi, tl, th, s);
+    if (c >= minc && c <= maxc && maxc != 0) {
+        int ntl = tl && c == lo[d], nth = th && c == hi[d];
+        buf[d] = c;
+        if (t->a[n].end) {
+            buf[d + 1] = 0;
+            if (strcmp(buf, lo) >= 0 && strcmp(buf, hi) <= 0) emit(s, buf);
+        }
+        range_rec(t, t->a[n].eq, buf, d + 1, lo, hi, ntl, nth, s);
+    }
+    if (c < maxc) range_rec(t, t->a[n].hi, buf, d, lo, hi, tl, th, s);
+}
+static int tst_range(const TST *t, const char *lo, const char *hi, int limit, int silent, char (*out)[32])
+{
+    Sink s = {limit, 0, silent, out};
+    char buf[64];
+    range_rec(t, t->root, buf, 0, lo, hi, 1, 1, &s);
+    return s.count;
+}
+
+/* spell suggestions: every dictionary word at edit distance 1 (deletion, transposition, substitution, insertion) */
+static int cmp_str32(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+typedef int (*lookup_fn)(const void *ds, const char *w);
+static int suggest_generic(const void *ds, lookup_fn lookup, const char *w, char (*out)[32], int max)
+{
+    int L = (int)strlen(w), cnt = 0;
+    char c[64];
+    #define TRY() do { if (lookup(ds, c) && cnt < max) { int dup = 0; for (int q = 0; q < cnt; q++) if (!strcmp(out[q], c)) dup = 1; if (!dup) strcpy(out[cnt++], c); } } while (0)
+    for (int i = 0; i < L; i++) { memcpy(c, w, i); strcpy(c + i, w + i + 1); TRY(); }                   /* deletion      */
+    for (int i = 0; i + 1 < L; i++) { strcpy(c, w); c[i] = w[i + 1]; c[i + 1] = w[i]; TRY(); }          /* transposition */
+    for (int i = 0; i < L; i++) for (char x = 'a'; x <= 'z'; x++) { strcpy(c, w); c[i] = x; TRY(); }     /* substitution  */
+    for (int i = 0; i <= L; i++) for (char x = 'a'; x <= 'z'; x++) { memcpy(c, w, i); c[i] = x; strcpy(c + i + 1, w + i); TRY(); }  /* insertion */
+    #undef TRY
+    qsort(out, cnt, 32, cmp_str32);
+    return cnt;
+}
+static int tst_lookup_v(const void *ds, const char *w) { return tst_lookup((const TST *)ds, w); }
+static int tst_suggest(const TST *t, const char *w, char (*out)[32], int max) { return suggest_generic(t, tst_lookup_v, w, out, max); }
+
+/* ---------------- sorted array (the baseline) ---------------- */
+typedef struct { char *pool; int *off; int n; size_t pool_bytes; } SArr;
+static int cmp_ptr(const void *a, const void *b) { return strcmp(*(char *const *)a, *(char *const *)b); }
+static const char *sa_get(const SArr *s, int i) { return s->pool + s->off[i]; }
+static int sa_lower_bound(const SArr *s, const char *key)             /* first index with word >= key */
+{
+    int lo = 0, hi = s->n;
+    while (lo < hi) { int mid = (lo + hi) / 2; if (strcmp(sa_get(s, mid), key) < 0) lo = mid + 1; else hi = mid; }
+    return lo;
+}
+static int sa_lookup(const SArr *s, const char *w) { int i = sa_lower_bound(s, w); return i < s->n && !strcmp(sa_get(s, i), w); }
+static int sa_lookup_v(const void *ds, const char *w) { return sa_lookup((const SArr *)ds, w); }
+static int sa_suggest(const SArr *s, const char *w, char (*out)[32], int max) { return suggest_generic(s, sa_lookup_v, w, out, max); }
+
+/* ---------------- helpers ---------------- */
+static char **load_words(const char *file, int *count)
+{
+    FILE *f = fopen(file, "r");
+    if (!f) { fprintf(stderr, "cannot open %s (run from the Q7_Dictionary folder)\n", file); exit(1); }
+    int cap = 1024, n = 0; char **w = malloc(cap * sizeof *w); char line[128];
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!*line) continue;
+        if (n == cap) { cap *= 2; w = realloc(w, cap * sizeof *w); }
+        w[n++] = strdup(line);
+    }
+    fclose(f); *count = n; return w;
+}
+static double now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e9 + t.tv_nsec; }
+static unsigned long long rng = 88172645463325252ULL;
+static unsigned next_rand(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (unsigned)(rng >> 11); }
+
+static void free_words(char **w, int n) { for (int i = 0; i < n; i++) free(w[i]); free(w); }
+static void free_all(TST *t, SArr *s, char **w, int n) { free(t->a); free(s->pool); free(s->off); free_words(w, n); }
+
+static void build_sorted(SArr *s, char **words, int n)
+{
+    char **tmp = malloc(n * sizeof *tmp); memcpy(tmp, words, n * sizeof *tmp);
+    qsort(tmp, n, sizeof *tmp, cmp_ptr);
+    size_t bytes = 0; for (int i = 0; i < n; i++) bytes += strlen(tmp[i]) + 1;
+    s->pool = malloc(bytes); s->off = malloc(n * sizeof(int)); s->n = n; s->pool_bytes = bytes;
+    size_t p = 0;
+    for (int i = 0; i < n; i++) { s->off[i] = (int)p; strcpy(s->pool + p, tmp[i]); p += strlen(tmp[i]) + 1; }
+    free(tmp);
+}
+/* exact node count of a 26-ary trie built from the sorted words: sum of (len - common prefix with previous) + root */
+static long trie26_nodes(const SArr *s)
+{
+    long nodes = 1; const char *prev = "";
+    for (int i = 0; i < s->n; i++) {
+        const char *w = sa_get(s, i); int l = 0;
+        while (prev[l] && prev[l] == w[l]) l++;
+        nodes += (long)strlen(w) - l; prev = w;
+    }
+    return nodes;
+}
+static void mutate(const char *w, char *out)                          /* make a "typing error": substitute one letter */
+{
+    strcpy(out, w); int L = (int)strlen(w); int i = next_rand() % L;
+    char x; do x = 'a' + next_rand() % 26; while (x == w[i]);
+    out[i] = x;
+}
+
+/* ---------------- modes ---------------- */
+static void verify(const char *file)
+{
+    int n; char **w = load_words(file, &n);
+    TST t; tst_init(&t); for (int i = 0; i < n; i++) tst_insert(&t, w[i]);
+    SArr s; build_sorted(&s, w, n);
+    printf("=== Q7 verification on %d words (%s) ===\n", n, file);
+    printf("TST nodes = %d (%zu bytes), sorted array = %zu bytes\n", t.n, (size_t)t.n * sizeof(TNode), s.pool_bytes + (size_t)n * 4);
+
+    int ok = 0, bad = 0;
+    for (int i = 0; i < n; i++) { if (tst_lookup(&t, w[i])) ok++; else bad++; }
+    printf("1. look-up of every stored word : %d found, %d missing\n", ok, bad);
+
+    int agree = 0, tot = 2000; char m[64];
+    for (int i = 0; i < tot; i++) { mutate(w[next_rand() % n], m); if (tst_lookup(&t, m) == sa_lookup(&s, m)) agree++; }
+    printf("2. look-up of %d mistyped words  : TST agrees with binary search on %d\n", tot, agree);
+
+    int pa = 0, pt = 300; char (*o1)[32] = malloc(32 * 100), (*o2)[32] = malloc(32 * 100);
+    for (int i = 0; i < pt; i++) {
+        char pre[8]; const char *src = w[next_rand() % n]; int L = 1 + next_rand() % 3; if (L > (int)strlen(src)) L = strlen(src);
+        memcpy(pre, src, L); pre[L] = 0;
+        int c1 = tst_autocomplete(&t, pre, 100, 1, o1);
+        int lb = sa_lower_bound(&s, pre), c2 = 0; size_t pl = strlen(pre);
+        for (int j = lb; j < s.n && c2 < 100 && !strncmp(sa_get(&s, j), pre, pl); j++) strcpy(o2[c2++], sa_get(&s, j));
+        int same = c1 == c2; for (int j = 0; same && j < c1; j++) if (strcmp(o1[j], o2[j])) same = 0;
+        pa += same;
+    }
+    printf("3. autocomplete (%d random prefixes, first 100): identical list in %d\n", pt, pa);
+
+    int ra = 0, rt = 300; char (*r1)[32] = malloc(32 * 5000), (*r2)[32] = malloc(32 * 5000);
+    for (int i = 0; i < rt; i++) {
+        char a[64], b[64]; strcpy(a, w[next_rand() % n]); strcpy(b, w[next_rand() % n]);
+        if (strcmp(a, b) > 0) { char x[64]; strcpy(x, a); strcpy(a, b); strcpy(b, x); }
+        int c1 = tst_range(&t, a, b, 5000, 1, r1);
+        int lo = sa_lower_bound(&s, a), c2 = 0;
+        for (int j = lo; j < s.n && strcmp(sa_get(&s, j), b) <= 0; j++) { if (c2 < 5000) strcpy(r2[c2], sa_get(&s, j)); c2++; }
+        int same = c1 == (c2 > 5000 ? 5000 : c2); for (int j = 0; same && j < c1; j++) if (strcmp(r1[j], r2[j])) same = 0;
+        ra += same;
+    }
+    printf("4. alphabetical range  (%d random [a,b])      : identical list in %d\n", rt, ra);
+
+    int found = 0, st = 500; char (*sg)[32] = malloc(32 * 400);
+    for (int i = 0; i < st; i++) {
+        const char *orig = w[next_rand() % n]; mutate(orig, m);
+        int c = tst_suggest(&t, m, sg, 400);
+        for (int j = 0; j < c; j++) if (!strcmp(sg[j], orig)) { found++; break; }
+    }
+    printf("5. spell-check (%d single-letter typos)  : correct word among suggestions in %d\n", st, found);
+    free(o1); free(o2); free(r1); free(r2); free(sg);
+    free_all(&t, &s, w, n);
+}
+
+static void demo(const char *file)
+{
+    int n; char **w = load_words(file, &n);
+    TST t; tst_init(&t); for (int i = 0; i < n; i++) tst_insert(&t, w[i]);
+    SArr s; build_sorted(&s, w, n);
+    printf("=== Q7 demo on %d words ===\n", n);
+    const char *word = sa_get(&s, 500);
+    printf("look-up(\"%s\")       -> %s\n", word, tst_lookup(&t, word) ? "FOUND" : "missing");
+    printf("look-up(\"qzxv\")        -> %s\n", tst_lookup(&t, "qzxv") ? "FOUND" : "missing");
+    char pre[4]; memcpy(pre, sa_get(&s, 300), 3); pre[3] = 0;
+    printf("autocomplete(\"%s\")   : ", pre); tst_autocomplete(&t, pre, 8, 0, NULL); printf("\n");
+    const char *a = sa_get(&s, 100), *b = sa_get(&s, 112);
+    printf("range [%s .. %s] : ", a, b); int c = tst_range(&t, a, b, 100, 0, NULL); printf("\n   (%d words)\n", c);
+    char typo[64]; strcpy(typo, sa_get(&s, 700)); typo[1] = (typo[1] == 'z') ? 'y' : 'z';
+    char (*sg)[32] = malloc(32 * 400);
+    int k = tst_suggest(&t, typo, sg, 400);
+    printf("spell-check(\"%s\") -> %d suggestion(s):", typo, k); for (int i = 0; i < k && i < 6; i++) printf(" %s", sg[i]); printf("\n");
+    free(sg);
+    free_all(&t, &s, w, n);
+}
+
+static void measure(const char *file)
+{
+    int n; char **w = load_words(file, &n);
+    printf("=== Q7 measurements on %d words (%s) ===\n", n, file);
+    double t0 = now_ns();
+    TST t; tst_init(&t); for (int i = 0; i < n; i++) tst_insert(&t, w[i]);
+    double tst_build = (now_ns() - t0) / 1e6;
+    SArr s; t0 = now_ns(); build_sorted(&s, w, n); double sa_build = (now_ns() - t0) / 1e6;
+    size_t tst_bytes = (size_t)t.n * sizeof(TNode);
+    size_t sa_bytes = s.pool_bytes + (size_t)n * sizeof(int);
+    long tn = trie26_nodes(&s); size_t t26_bytes = (size_t)tn * (26 * 8 + 8);
+    size_t raw = s.pool_bytes;
+
+    printf("%-34s %14s %14s %14s\n", "", "26-ary trie", "TST (chosen)", "sorted array");
+    printf("%-34s %14ld %14d %14d\n", "nodes / entries", tn, t.n, n);
+    printf("%-34s %11.2f MB %11.2f MB %11.2f MB\n", "memory", t26_bytes / 1048576.0, tst_bytes / 1048576.0, sa_bytes / 1048576.0);
+    printf("%-34s %14.1f %14.1f %14.1f\n", "bytes per word", (double)t26_bytes / n, (double)tst_bytes / n, (double)sa_bytes / n);
+    printf("%-34s %14s %11.0f ms %11.0f ms\n", "build time (words in random order)", "-", tst_build, sa_build);
+    printf("raw text of all words = %.2f MB\n", raw / 1048576.0);
+
+    /* timings */
+    const int Q = 200000; char **q = malloc(Q * sizeof *q); char buf[64];
+    for (int i = 0; i < Q; i++) {
+        if (i % 2) q[i] = w[next_rand() % n];
+        else { mutate(w[next_rand() % n], buf); q[i] = strdup(buf); }
+    }
+    volatile long sink = 0;
+    t0 = now_ns(); for (int i = 0; i < Q; i++) sink += tst_lookup(&t, q[i]); double l1 = (now_ns() - t0) / Q;
+    t0 = now_ns(); for (int i = 0; i < Q; i++) sink += sa_lookup(&s, q[i]); double l2 = (now_ns() - t0) / Q;
+    const int P = 20000; char (*pre)[8] = malloc(P * 8);
+    for (int i = 0; i < P; i++) { const char *src = w[next_rand() % n]; int L = 2 + next_rand() % 2; if (L > (int)strlen(src)) L = strlen(src); memcpy(pre[i], src, L); pre[i][L] = 0; }
+    t0 = now_ns(); for (int i = 0; i < P; i++) sink += tst_autocomplete(&t, pre[i], 10, 1, NULL); double a1 = (now_ns() - t0) / P;
+    t0 = now_ns();
+    for (int i = 0; i < P; i++) { int lb = sa_lower_bound(&s, pre[i]), c = 0; size_t pl = strlen(pre[i]); for (int j = lb; j < s.n && c < 10 && !strncmp(sa_get(&s, j), pre[i], pl); j++) c++; sink += c; }
+    double a2 = (now_ns() - t0) / P;
+    const int R = 5000; int ranges = 0; double rt1 = 0, rt2 = 0;
+    for (int i = 0; i < R; i++) {
+        int x = next_rand() % (n - 60); const char *a = sa_get(&s, x), *b = sa_get(&s, x + 50);
+        t0 = now_ns(); sink += tst_range(&t, a, b, 100000, 1, NULL); rt1 += now_ns() - t0;
+        t0 = now_ns(); int lo = sa_lower_bound(&s, a), c = 0; for (int j = lo; j < n && strcmp(sa_get(&s, j), b) <= 0; j++) c++; sink += c; rt2 += now_ns() - t0;
+        ranges++;
+    }
+    char (*sg)[32] = malloc(32 * 400); const int S = 2000;
+    t0 = now_ns(); for (int i = 0; i < S; i++) { mutate(w[next_rand() % n], buf); sink += tst_suggest(&t, buf, sg, 400); } double s1 = (now_ns() - t0) / S;
+
+    printf("--- time per operation ---\n");
+    printf("%-34s %14s %11.0f ns %11.0f ns\n", "exact look-up (50% misspelt)", "-", l1, l2);
+    printf("%-34s %14s %11.2f us %11.2f us\n", "autocomplete, 2-3 letters, top 10", "-", a1 / 1000, a2 / 1000);
+    printf("%-34s %14s %11.2f us %11.2f us\n", "range listing of 51 words", "-", rt1 / ranges / 1000, rt2 / ranges / 1000);
+    t0 = now_ns(); for (int i = 0; i < S; i++) { mutate(w[next_rand() % n], buf); sink += sa_suggest(&s, buf, sg, 400); } double s2 = (now_ns() - t0) / S;
+    printf("%-34s %14s %11.1f us %11.1f us\n", "spell suggestions (edit dist 1)", "-", s1 / 1000, s2 / 1000);
+
+    /* weekly update */
+    int U = 5000; TST t2 = t; t2.a = malloc((size_t)t.cap * sizeof(TNode)); memcpy(t2.a, t.a, (size_t)t.n * sizeof(TNode));
+    t0 = now_ns();
+    for (int i = 0; i < U; i++) { char nw[40]; sprintf(nw, "%sxx%d", w[next_rand() % n], i); tst_insert(&t2, nw); }
+    double up1 = (now_ns() - t0) / 1e6;
+    printf("--- weekly update: add %d new words ---\n", U);
+    printf("TST incremental insert : %.1f ms          sorted array : full re-sort %.0f ms\n", up1, sa_build);
+
+    printf("--- projection for 2,000,000 words (10x) ---\n");
+    printf("TST %.1f MB, sorted array %.1f MB, 26-ary trie %.0f MB\n", tst_bytes * 10 / 1048576.0, sa_bytes * 10 / 1048576.0, t26_bytes * 10 / 1048576.0);
+    (void)sink;
+    for (int i = 0; i < Q; i += 2) free(q[i]);
+    free(q); free(pre); free(sg); free(t2.a);
+    free_all(&t, &s, w, n);
+}
+
+int main(int argc, char **argv)
+{
+    int mode = argc > 1 ? atoi(argv[1]) : 1;
+    const char *file = argc > 2 ? argv[2] : (mode == 2 ? "words_200k.txt" : "sample_1000.txt");
+    if (mode == 1) verify(file);
+    else if (mode == 2) measure(file);
+    else demo(file);
+    return 0;
+}
