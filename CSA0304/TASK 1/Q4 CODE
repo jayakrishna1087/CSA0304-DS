@@ -1,0 +1,306 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+
+/* ================= red-black tree (CLRS, sentinel NIL) ================= */
+typedef struct R { int key; int red; struct R *l, *r, *p; } R;
+static R nilnode = {0, 0, &nilnode, &nilnode, &nilnode};
+#define NIL (&nilnode)
+static R *root = NIL;
+static long rb_rot, rb_rot_op;               /* rotations total / in the current operation */
+static int verbose = 0;
+
+static void left_rotate(R *x)
+{
+    R *y = x->r;
+    x->r = y->l; if (y->l != NIL) y->l->p = x;
+    y->p = x->p;
+    if (x->p == NIL) root = y; else if (x == x->p->l) x->p->l = y; else x->p->r = y;
+    y->l = x; x->p = y;
+    rb_rot++; rb_rot_op++;
+}
+static void right_rotate(R *y)
+{
+    R *x = y->l;
+    y->l = x->r; if (x->r != NIL) x->r->p = y;
+    x->p = y->p;
+    if (y->p == NIL) root = x; else if (y == y->p->r) y->p->r = x; else y->p->l = x;
+    x->r = y; y->p = x;
+    rb_rot++; rb_rot_op++;
+}
+
+static void insert_fixup(R *z)
+{
+    while (z->p->red) {
+        R *g = z->p->p;
+        if (z->p == g->l) {
+            R *u = g->r;
+            if (u->red) {
+                if (verbose) printf("      recolour: parent %d and uncle %d -> BLACK, grandparent %d -> RED\n", z->p->key, u->key, g->key);
+                z->p->red = 0; u->red = 0; g->red = 1; z = g;
+            } else {
+                if (z == z->p->r) { z = z->p; if (verbose) printf("      rotate LEFT at %d (zig-zag -> straight line)\n", z->key); left_rotate(z); }
+                z->p->red = 0; g->red = 1;
+                if (verbose) printf("      recolour: %d -> BLACK, %d -> RED; rotate RIGHT at %d\n", z->p->key, g->key, g->key);
+                right_rotate(g);
+            }
+        } else {
+            R *u = g->l;
+            if (u->red) {
+                if (verbose) printf("      recolour: parent %d and uncle %d -> BLACK, grandparent %d -> RED\n", z->p->key, u->key, g->key);
+                z->p->red = 0; u->red = 0; g->red = 1; z = g;
+            } else {
+                if (z == z->p->l) { z = z->p; if (verbose) printf("      rotate RIGHT at %d (zig-zag -> straight line)\n", z->key); right_rotate(z); }
+                z->p->red = 0; g->red = 1;
+                if (verbose) printf("      recolour: %d -> BLACK, %d -> RED; rotate LEFT at %d\n", z->p->key, g->key, g->key);
+                left_rotate(g);
+            }
+        }
+    }
+    if (root->red && verbose) printf("      root %d recoloured BLACK\n", root->key);
+    root->red = 0;
+}
+
+static R *leftmost_cache = NIL;
+void rb_insert(int key)
+{
+    rb_rot_op = 0;
+    R *y = NIL, *x = root;
+    while (x != NIL) { y = x; if (key == x->key) return; x = key < x->key ? x->l : x->r; }
+    R *z = malloc(sizeof *z);
+    z->key = key; z->red = 1; z->l = z->r = NIL; z->p = y;
+    if (y == NIL) root = z; else if (key < y->key) y->l = z; else y->r = z;
+    if (leftmost_cache == NIL || key < leftmost_cache->key) leftmost_cache = z;
+    insert_fixup(z);
+}
+
+static R *minimum(R *x) { while (x->l != NIL) x = x->l; return x; }
+static R *rb_find(int key) { R *x = root; while (x != NIL && x->key != key) x = key < x->key ? x->l : x->r; return x; }
+static void transplant(R *u, R *v)
+{
+    if (u->p == NIL) root = v; else if (u == u->p->l) u->p->l = v; else u->p->r = v;
+    v->p = u->p;
+}
+static void delete_fixup(R *x)
+{
+    while (x != root && !x->red) {
+        if (x == x->p->l) {
+            R *w = x->p->r;
+            if (w->red) { w->red = 0; x->p->red = 1; left_rotate(x->p); w = x->p->r; }
+            if (!w->l->red && !w->r->red) { w->red = 1; x = x->p; }
+            else {
+                if (!w->r->red) { w->l->red = 0; w->red = 1; right_rotate(w); w = x->p->r; }
+                w->red = x->p->red; x->p->red = 0; w->r->red = 0; left_rotate(x->p); x = root;
+            }
+        } else {
+            R *w = x->p->l;
+            if (w->red) { w->red = 0; x->p->red = 1; right_rotate(x->p); w = x->p->l; }
+            if (!w->r->red && !w->l->red) { w->red = 1; x = x->p; }
+            else {
+                if (!w->l->red) { w->r->red = 0; w->red = 1; left_rotate(w); w = x->p->l; }
+                w->red = x->p->red; x->p->red = 0; w->l->red = 0; right_rotate(x->p); x = root;
+            }
+        }
+    }
+    x->red = 0;
+}
+void rb_delete(int key)
+{
+    rb_rot_op = 0;
+    R *z = rb_find(key), *y = z, *x;
+    if (z == NIL) return;
+    if (z == leftmost_cache) leftmost_cache = z->r != NIL ? minimum(z->r) : z->p;   /* successor of the leftmost */
+    int y_red = y->red;
+    if (z->l == NIL)      { x = z->r; transplant(z, z->r); }
+    else if (z->r == NIL) { x = z->l; transplant(z, z->l); }
+    else {
+        y = minimum(z->r); y_red = y->red; x = y->r;
+        if (y->p == z) x->p = y; else { transplant(y, y->r); y->r = z->r; y->r->p = y; }
+        transplant(z, y); y->l = z->l; y->l->p = y; y->red = z->red;
+    }
+    free(z);
+    if (!y_red) delete_fixup(x);
+    if (root == NIL) leftmost_cache = NIL;
+}
+static void rb_free(R *n) { if (n != NIL) { rb_free(n->l); rb_free(n->r); free(n); } }
+static void rb_clear(void) { rb_free(root); root = NIL; leftmost_cache = NIL; }
+static int rb_height(const R *n) { return n == NIL ? 0 : 1 + (rb_height(n->l) > rb_height(n->r) ? rb_height(n->l) : rb_height(n->r)); }
+
+/* checking function: returns black-height, or -1 if a property is violated */
+static int check(const R *n, long lo, long hi)
+{
+    if (n == NIL) return 1;                                   /* P3: NIL leaves are black and count 1 */
+    if (n->key <= lo || n->key >= hi) return -1;              /* BST order */
+    if (n->red && (n->l->red || n->r->red)) return -1;        /* P4 */
+    int a = check(n->l, lo, n->key), b = check(n->r, n->key, hi);
+    if (a < 0 || b < 0 || a != b) return -1;                  /* P5 */
+    return a + (n->red ? 0 : 1);
+}
+static int rb_valid(void) { return !root->red && nilnode.red == 0 && check(root, -2147483647L, 2147483647L) > 0; }   /* P2 + others */
+
+static void bracket(const R *n)
+{
+    if (n == NIL) return;
+    printf("%d%c", n->key, n->red ? 'R' : 'B');
+    if (n->l != NIL || n->r != NIL) { printf("("); bracket(n->l); printf(","); bracket(n->r); printf(")"); }
+}
+
+/* ================= AVL tree with deletion (for the rotation comparison) ================= */
+typedef struct A { int key, h; struct A *l, *r; } A;
+static long avl_rot, avl_rot_op;
+static int ah(const A *n) { return n ? n->h : 0; }
+static void afix(A *n) { int a = ah(n->l), b = ah(n->r); n->h = 1 + (a > b ? a : b); }
+static int abf(const A *n) { return ah(n->l) - ah(n->r); }
+static A *arot_r(A *y) { A *x = y->l; y->l = x->r; x->r = y; afix(y); afix(x); avl_rot++; avl_rot_op++; return x; }
+static A *arot_l(A *x) { A *y = x->r; x->r = y->l; y->l = x; afix(x); afix(y); avl_rot++; avl_rot_op++; return y; }
+static A *rebalance(A *n)
+{
+    afix(n);
+    int b = abf(n);
+    if (b > 1)  { if (abf(n->l) < 0) n->l = arot_l(n->l); return arot_r(n); }
+    if (b < -1) { if (abf(n->r) > 0) n->r = arot_r(n->r); return arot_l(n); }
+    return n;
+}
+static A *avl_ins(A *n, int k)
+{
+    if (!n) { n = malloc(sizeof *n); n->key = k; n->h = 1; n->l = n->r = NULL; return n; }
+    if (k < n->key) n->l = avl_ins(n->l, k); else if (k > n->key) n->r = avl_ins(n->r, k); else return n;
+    return rebalance(n);
+}
+static A *avl_del(A *n, int k)
+{
+    if (!n) return NULL;
+    if (k < n->key) n->l = avl_del(n->l, k);
+    else if (k > n->key) n->r = avl_del(n->r, k);
+    else {
+        if (!n->l || !n->r) { A *c = n->l ? n->l : n->r; free(n); return c; }
+        A *s = n->r; while (s->l) s = s->l;
+        n->key = s->key; n->r = avl_del(n->r, s->key);
+    }
+    return rebalance(n);
+}
+static int avl_ok(const A *n, long lo, long hi)
+{
+    if (!n) return 1;
+    int b = abf(n);
+    if (b < -1 || b > 1 || n->key <= lo || n->key >= hi) return 0;
+    return avl_ok(n->l, lo, n->key) && avl_ok(n->r, n->key, hi);
+}
+static void avl_free(A *n) { if (n) { avl_free(n->l); avl_free(n->r); free(n); } }
+
+static unsigned long long rng = 88172645463325252ULL;
+static unsigned next_rand(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (unsigned)(rng >> 11); }
+
+/* ================= sections ================= */
+static void section1(void)
+{
+    printf("=== Q4 trace: red-black insertion of 10, 20, 30, 15, 25, 5  (R = red, B = black) ===\n");
+    int keys[] = {10, 20, 30, 15, 25, 5};
+    verbose = 1;
+    for (int i = 0; i < 6; i++) {
+        printf("insert %d (new node is RED)\n", keys[i]);
+        rb_insert(keys[i]);
+        printf("   tree: "); bracket(root);
+        printf("   [rotations so far: %ld, valid: %s]\n", rb_rot, rb_valid() ? "yes" : "NO");
+    }
+    verbose = 0;
+    printf("height = %d levels, black-height = %d\n", rb_height(root), check(root, -2147483647L, 2147483647L) - 1);
+    rb_clear();
+}
+
+static void section2(void)
+{
+    printf("=== Q4 scheduler demo: smallest CPU time = leftmost node ===\n");
+    int vr[] = {420, 150, 980, 310, 75, 640, 205, 530};          /* CPU time used by 8 processes */
+    for (int i = 0; i < 8; i++) rb_insert(vr[i]);
+    printf("tree: "); bracket(root); printf("\n");
+    for (int round = 1; round <= 4; round++) {
+        int steps = 0; R *x = root;
+        while (x->l != NIL) { x = x->l; steps++; }
+        printf("pick %d: walk to leftmost = %d (%d steps down); cached pointer = %d (0 steps)\n",
+               round, x->key, steps, leftmost_cache->key);
+        int k = leftmost_cache->key;
+        rb_delete(k);                                         /* process runs, then leaves the tree */
+        printf("        removed %d -> new tree: ", k); bracket(root);
+        printf("   [valid: %s]\n", rb_valid() ? "yes" : "NO");
+    }
+    rb_clear();
+}
+
+static void section3(void)
+{
+    const int N = 10000;
+    printf("=== Q4 experiments: %d random insertions and deletions ===\n", N);
+    int *keys = malloc(N * sizeof *keys);
+    for (int i = 0; i < N; i++) keys[i] = i + 1;
+    for (int i = N - 1; i > 0; i--) { int j = next_rand() % (i + 1); int x = keys[i]; keys[i] = keys[j]; keys[j] = x; }
+
+    /* ---- red-black: insert all, check after every operation ---- */
+    long ins_fail = 0, del_fail = 0; long max_ins = 0, max_del = 0;
+    rb_rot = 0;
+    for (int i = 0; i < N; i++) {
+        rb_insert(keys[i]);
+        if (rb_rot_op > max_ins) max_ins = rb_rot_op;
+        if (!rb_valid()) ins_fail++;
+    }
+    long rb_ins_rot = rb_rot; int rb_h_ins = rb_height(root);
+    int bh = check(root, -2147483647L, 2147483647L) - 1;
+    /* ---- AVL: insert all ---- */
+    A *avl = NULL; avl_rot = 0; long avl_max_ins = 0, avl_fail = 0;
+    for (int i = 0; i < N; i++) {
+        avl_rot_op = 0; avl = avl_ins(avl, keys[i]);
+        if (avl_rot_op > avl_max_ins) avl_max_ins = avl_rot_op;
+        if (!avl_ok(avl, -1, N + 1)) avl_fail++;
+    }
+    long avl_ins_rot = avl_rot; int avl_h_ins = ah(avl);
+
+    /* ---- delete in a different random order ---- */
+    for (int i = N - 1; i > 0; i--) { int j = next_rand() % (i + 1); int x = keys[i]; keys[i] = keys[j]; keys[j] = x; }
+    rb_rot = 0; avl_rot = 0; long avl_max_del = 0;
+    for (int i = 0; i < N; i++) {
+        rb_delete(keys[i]);
+        if (rb_rot_op > max_del) max_del = rb_rot_op;
+        if (!rb_valid()) del_fail++;
+        avl_rot_op = 0; avl = avl_del(avl, keys[i]);
+        if (avl_rot_op > avl_max_del) avl_max_del = avl_rot_op;
+        if (!avl_ok(avl, -1, N + 1)) avl_fail++;
+    }
+    long rb_del_rot = rb_rot, avl_del_rot = avl_rot;
+
+    printf("%-30s %12s %12s\n", "", "red-black", "AVL");
+    printf("%-30s %12ld %12ld\n", "rotations, 10000 insertions", rb_ins_rot, avl_ins_rot);
+    printf("%-30s %12.3f %12.3f\n", "  per insertion", (double)rb_ins_rot / N, (double)avl_ins_rot / N);
+    printf("%-30s %12ld %12ld\n", "  max in one insertion", max_ins, avl_max_ins);
+    printf("%-30s %12ld %12ld\n", "rotations, 10000 deletions", rb_del_rot, avl_del_rot);
+    printf("%-30s %12.3f %12.3f\n", "  per deletion", (double)rb_del_rot / N, (double)avl_del_rot / N);
+    printf("%-30s %12ld %12ld\n", "  max in one deletion", max_del, avl_max_del);
+    printf("%-30s %12d %12d\n", "height after 10000 inserts", rb_h_ins, avl_h_ins);
+    printf("%-30s %12d %12s\n", "black-height of red-black", bh, "-");
+    printf("bound: RB height <= 2*log2(n+1) = %.1f; AVL height <= 1.44*log2(n+2) = %.1f\n", 2 * log2(N + 1.0), 1.44 * log2(N + 2.0));
+    printf("property check after every operation: %ld failures in %d red-black ops, %ld failures in %d AVL ops\n",
+           ins_fail + del_fail, 2 * N, avl_fail, 2 * N);
+    printf("tree empty after deleting all keys: %s\n", root == NIL ? "yes" : "NO");
+    avl_free(avl); free(keys); rb_clear();
+
+    /* ---- increasing-order insertion ---- */
+    const int M = 100000;
+    rb_rot = 0; long bad = 0;
+    for (int i = 1; i <= M; i++) { rb_insert(i); if (i % 5000 == 0 && !rb_valid()) bad++; }
+    int rb_h = rb_height(root);
+    A *a2 = NULL; for (int i = 1; i <= M; i++) a2 = avl_ins(a2, i);
+    printf("--- increasing order 1..%d ---\n", M);
+    printf("red-black: height %d levels, %ld rotations, black-height %d, valid: %s (checked every 5000 inserts: %ld failures)\n",
+           rb_h, rb_rot, check(root, -2147483647L, 2147483647L) - 1, rb_valid() ? "yes" : "NO", bad);
+    printf("AVL      : height %d levels\n", ah(a2));
+    printf("plain BST would have height %d\n", M);
+    avl_free(a2); rb_clear();
+}
+
+int main(int argc, char **argv)
+{
+    int sel = argc > 1 ? atoi(argv[1]) : 0;
+    if (!sel || sel == 1) section1();
+    if (!sel || sel == 2) section2();
+    if (!sel || sel == 3) section3();
+    return 0;
+}
