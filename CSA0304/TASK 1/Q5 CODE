@@ -1,0 +1,198 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---------------- splay tree (bottom-up, parent pointers) ---------------- */
+typedef struct S { int key; struct S *l, *r, *p; } S;
+static long rotations;
+
+static void rotate_up(S **root, S *x)               /* single rotation of x over its parent */
+{
+    S *p = x->p, *g = p->p;
+    if (x == p->l) { p->l = x->r; if (x->r) x->r->p = p; x->r = p; }
+    else           { p->r = x->l; if (x->l) x->l->p = p; x->l = p; }
+    p->p = x; x->p = g;
+    if (!g) *root = x; else if (g->l == p) g->l = x; else g->r = x;
+    rotations++;
+}
+
+static void bracket(const S *n)
+{
+    if (!n) return;
+    printf("%d", n->key);
+    if (n->l || n->r) { printf("("); bracket(n->l); printf(","); bracket(n->r); printf(")"); }
+}
+
+static void splay(S **root, S *x, int verbose)
+{
+    while (x->p) {
+        S *p = x->p, *g = p->p;
+        if (!g) {
+            if (verbose) printf("   ZIG      : %d is a child of the root %d -> one rotation\n", x->key, p->key);
+            rotate_up(root, x);
+        } else if ((g->l == p) == (p->l == x)) {
+            if (verbose) printf("   ZIG-ZIG  : %d, parent %d, grandparent %d in a straight line -> rotate parent first, then %d\n", x->key, p->key, g->key, x->key);
+            rotate_up(root, p); rotate_up(root, x);
+        } else {
+            if (verbose) printf("   ZIG-ZAG  : %d, parent %d, grandparent %d form a zig-zag -> rotate %d twice\n", x->key, p->key, g->key, x->key);
+            rotate_up(root, x); rotate_up(root, x);
+        }
+        if (verbose) { printf("              tree: "); bracket(*root); printf("\n"); }
+    }
+}
+
+/* search with splaying; returns number of nodes visited. If the key is missing the last node visited is splayed. */
+static int splay_find(S **root, int key, int *found, int verbose)
+{
+    int visits = 0; S *x = *root, *last = NULL;
+    *found = 0;
+    while (x) {
+        visits++; last = x;
+        if (key == x->key) { *found = 1; break; }
+        x = key < x->key ? x->l : x->r;
+    }
+    if (last) splay(root, last, verbose);
+    return visits;
+}
+
+static S *plain_insert(S *root, int key)             /* ordinary BST insert, no splaying */
+{
+    S *y = NULL, *x = root;
+    while (x) { y = x; if (key == x->key) return root; x = key < x->key ? x->l : x->r; }
+    S *z = calloc(1, sizeof *z); z->key = key; z->p = y;
+    if (!y) return z;
+    if (key < y->key) y->l = z; else y->r = z;
+    return root;
+}
+static void splay_insert(S **root, int key)           /* insert then splay the new node to the root */
+{
+    int found; S *r = plain_insert(*root, key); *root = r;
+    splay_find(root, key, &found, 0);
+}
+static void sfree(S *n) { if (n) { sfree(n->l); sfree(n->r); free(n); } }
+static int sheight(const S *n) { if (!n) return 0; int a = sheight(n->l), b = sheight(n->r); return 1 + (a > b ? a : b); }
+
+/* ---------------- AVL tree (search only needs the shape) ---------------- */
+typedef struct A { int key, h; struct A *l, *r; } A;
+static int ah(const A *n) { return n ? n->h : 0; }
+static void afix(A *n) { int a = ah(n->l), b = ah(n->r); n->h = 1 + (a > b ? a : b); }
+static A *rr(A *y) { A *x = y->l; y->l = x->r; x->r = y; afix(y); afix(x); return x; }
+static A *rl(A *x) { A *y = x->r; x->r = y->l; y->l = x; afix(x); afix(y); return y; }
+static A *avl_ins(A *n, int k)
+{
+    if (!n) { n = malloc(sizeof *n); n->key = k; n->h = 1; n->l = n->r = NULL; return n; }
+    if (k < n->key) n->l = avl_ins(n->l, k); else if (k > n->key) n->r = avl_ins(n->r, k); else return n;
+    afix(n);
+    int b = ah(n->l) - ah(n->r);
+    if (b > 1 && k < n->l->key) return rr(n);
+    if (b < -1 && k > n->r->key) return rl(n);
+    if (b > 1) { n->l = rl(n->l); return rr(n); }
+    if (b < -1) { n->r = rr(n->r); return rl(n); }
+    return n;
+}
+static int avl_visits(const A *n, int key) { int v = 0; while (n) { v++; if (key == n->key) break; n = key < n->key ? n->l : n->r; } return v; }
+static void afree(A *n) { if (n) { afree(n->l); afree(n->r); free(n); } }
+
+static unsigned long long rng = 88172645463325252ULL;
+static unsigned next_rand(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (unsigned)(rng >> 11); }
+
+/* ---------------- sections ---------------- */
+static void section1(void)
+{
+    printf("=== Q5 trace: splaying after accessing 3, then 9 ===\n");
+    int init[] = {6, 4, 8, 2, 5, 7, 9, 1, 3};
+    S *root = NULL;
+    for (int i = 0; i < 9; i++) root = plain_insert(root, init[i]);
+    printf("initial tree: "); bracket(root); printf("\n");
+    int acc[] = {3, 9}, found;
+    for (int i = 0; i < 2; i++) {
+        printf("access %d:\n", acc[i]);
+        int v = splay_find(&root, acc[i], &found, 1);
+        printf("   visited %d nodes; %d is now the root\n", v, root->key);
+        printf("   result: "); bracket(root); printf("\n");
+    }
+    sfree(root);
+}
+
+enum { N = 1000, ACC = 10000, HOT = 50 };
+static int hot[HOT];
+static int pick(int skewed)
+{
+    if (!skewed) return 1 + next_rand() % N;
+    if (next_rand() % 100 < 80) return hot[next_rand() % HOT];
+    return 1 + next_rand() % N;
+}
+
+static void make_trees(S **splay_root, A **avl_root)
+{
+    int keys[N];
+    for (int i = 0; i < N; i++) keys[i] = i + 1;
+    for (int i = N - 1; i > 0; i--) { int j = next_rand() % (i + 1); int x = keys[i]; keys[i] = keys[j]; keys[j] = x; }
+    *splay_root = NULL; *avl_root = NULL;
+    for (int i = 0; i < N; i++) { splay_insert(splay_root, keys[i]); *avl_root = avl_ins(*avl_root, keys[i]); }
+    for (int i = 0; i < HOT; i++) hot[i] = keys[N - 1 - i];            /* 5% of the keys are "hot" */
+}
+
+static void section2(void)
+{
+    printf("=== Q5 simulation: %d accesses over %d products, hot set = %d products (5%%) ===\n", ACC, N, HOT);
+    S *sroot; A *aroot;
+    make_trees(&sroot, &aroot);
+    printf("%-34s %14s %14s\n", "", "splay tree", "AVL tree");
+    for (int skew = 1; skew >= 0; skew--) {
+        S *sr; A *ar; make_trees(&sr, &ar);
+        long sv = 0, av = 0, sv2 = 0; int smax = 0, found; long rot0 = rotations;
+        for (int i = 0; i < ACC; i++) {
+            int k = pick(skew);
+            int v = splay_find(&sr, k, &found, 0);
+            sv += v; if (i >= ACC / 2) sv2 += v;
+            if (v > smax) smax = v;
+            av += avl_visits(ar, k);
+        }
+        printf("--- %s workload ---\n", skew ? "SKEWED (80% of accesses to 5% of keys)" : "UNIFORM");
+        printf("%-34s %14.2f %14.2f\n", "avg nodes visited per access", (double)sv / ACC, (double)av / ACC);
+        printf("%-34s %14.2f %14s\n", "  last 5000 accesses only", (double)sv2 / (ACC / 2), "-");
+        printf("%-34s %14d %14d\n", "worst single access (nodes)", smax, ah(ar));
+        printf("%-34s %14.2f\n", "splay rotations per access", (double)(rotations - rot0) / ACC);
+        sfree(sr); afree(ar);
+    }
+    printf("log2(%d) = 9.97, AVL height = %d\n", N, ah(aroot));
+    sfree(sroot); afree(aroot);
+}
+
+static void section3(void)
+{
+    printf("=== Q5 extra tests ===\n");
+    /* root after first ten accesses */
+    S *sr; A *ar; make_trees(&sr, &ar);
+    printf("root after each of the first ten accesses (skewed workload):\n");
+    int found;
+    for (int i = 0; i < 10; i++) {
+        int k = pick(1); splay_find(&sr, k, &found, 0);
+        printf("  #%-2d access %-4d -> root %-4d%s", i + 1, k, sr->key, (i % 2) ? "\n" : "   ");
+    }
+    sfree(sr); afree(ar);
+
+    /* worst single access: a degenerate chain 1..N, then ask for the deepest key */
+    S *chain = NULL;
+    for (int i = 1; i <= N; i++) chain = plain_insert(chain, i);        /* degenerate chain, height N */
+    printf("chain built by inserting 1..%d without splaying: height %d\n", N, sheight(chain));
+    int v = splay_find(&chain, N, &found, 0);
+    printf("worst single access: key %d visits %d nodes (O(n)) - then it becomes the root\n", N, v);
+    long total = 0;
+    for (int i = 1; i <= N; i++) total += splay_find(&chain, i, &found, 0);
+    printf("then access 1,2,3,...,%d in sorted order: %ld visits in total = %.2f per access\n", N, total, (double)total / N);
+    total = 0;
+    for (int i = 1; i <= N; i++) total += splay_find(&chain, i, &found, 0);
+    printf("sorted sweep repeated: %.2f nodes per access (amortised cost stays tiny)\n", (double)total / N);
+    sfree(chain);
+}
+
+int main(int argc, char **argv)
+{
+    int sel = argc > 1 ? atoi(argv[1]) : 0;
+    if (!sel || sel == 1) section1();
+    if (!sel || sel == 2) section2();
+    if (!sel || sel == 3) section3();
+    return 0;
+}
